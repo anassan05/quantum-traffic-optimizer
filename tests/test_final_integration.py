@@ -3,6 +3,7 @@ from traffic_opt.demand import DemandScenarioConfig, TrafficScenario
 from traffic_opt.domain.enums import ControllerType, TrafficEventType
 from traffic_opt.events import TrafficEventConfig
 from traffic_opt.experiments import ExperimentConfig, ExperimentRunner
+from traffic_opt.dashboard.app import DEFAULT_DASHBOARD_HORIZON_SECONDS
 
 
 def experiment_config(
@@ -42,6 +43,20 @@ def test_complete_pipeline_returns_dashboard_consumable_result() -> None:
     assert result.metrics.total_vehicles <= result.number_of_generated_vehicles
     assert len(result.snapshots) == 9
     assert "Average waiting time (s)" in result_to_kpis(result)
+
+
+def test_dashboard_default_horizon_allows_normal_seeded_demand() -> None:
+    config = ExperimentConfig.default(
+        "dashboard-default",
+        seed=7,
+        simulation_horizon_seconds=DEFAULT_DASHBOARD_HORIZON_SECONDS,
+        scenario=TrafficScenario.NORMAL,
+    )
+
+    result = ExperimentRunner().run(config)
+
+    assert result.number_of_generated_vehicles > 0
+    assert result.metrics.total_vehicles > 0
 
 
 def test_all_controllers_complete_the_same_configured_pipeline() -> None:

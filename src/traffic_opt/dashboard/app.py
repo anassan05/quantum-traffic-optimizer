@@ -24,6 +24,9 @@ from traffic_opt.experiments import ExperimentConfig, ExperimentRunner, compare_
 from traffic_opt.network.topology import create_default_topology
 
 
+DEFAULT_DASHBOARD_HORIZON_SECONDS = 300
+
+
 st.set_page_config(page_title="Quantum Traffic Optimizer", page_icon="🚦", layout="wide")
 
 
@@ -64,7 +67,12 @@ def _sidebar_config() -> ExperimentConfig:
     st.sidebar.header("Experiment")
     name = st.sidebar.text_input("Experiment name", value="dashboard-run")
     seed = st.sidebar.number_input("Random seed", min_value=0, value=7, step=1)
-    horizon = st.sidebar.number_input("Simulation horizon (s)", min_value=1, value=20, step=1)
+    horizon = st.sidebar.number_input(
+        "Simulation horizon (s)",
+        min_value=1,
+        value=DEFAULT_DASHBOARD_HORIZON_SECONDS,
+        step=1,
+    )
     timestep = st.sidebar.number_input("Timestep (s)", min_value=0.1, value=1.0, step=0.1)
     scenario = st.sidebar.selectbox("Traffic scenario", list(TrafficScenario), format_func=lambda value: value.value.replace("_", " ").title())
     controller = st.sidebar.selectbox(
