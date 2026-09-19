@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "Hybrid quantum-classical urban traffic optimization platform."
 requires-python = ">=3.10"
 readme = "README.md"
-dependencies = ["networkx>=3.0"]
+dependencies = [
+	"networkx>=3.0",
+	"qiskit>=2.5,<3",
+	"qiskit-aer>=0.17,<1",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
