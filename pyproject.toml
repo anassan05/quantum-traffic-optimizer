@@ -12,6 +12,7 @@ dependencies = ["networkx>=3.0", "plotly>=5.0", "streamlit>=1.30"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
+quantum = ["qiskit>=1.0", "qiskit-aer>=0.13"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
