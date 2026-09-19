@@ -200,8 +200,10 @@ class ExperimentRunner:
             intersections,
             time_step_seconds=configuration.time_step_seconds,
             seed=configuration.seed,
+            events=events,
         )
-        simulator.add_vehicles(vehicles)
+        for demand_item, vehicle in zip(demand, vehicles):
+            simulator.schedule_vehicle(vehicle, demand_item.spawn_time)
         collector = MetricsCollector(
             self.topology,
             spawn_times={item.vehicle_id: item.spawn_time for item in demand},

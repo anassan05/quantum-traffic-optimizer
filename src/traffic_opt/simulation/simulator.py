@@ -6,7 +6,13 @@ from typing import Iterable
 import networkx as nx
 
 from traffic_opt.domain.models import Intersection
+from traffic_opt.domain.models import TrafficEvent
 
+from .events import (
+    EffectiveRoadCondition,
+    EventImpactConfig,
+    effective_road_conditions,
+)
 from .state import IntersectionSignalState, SimulationState
 from .vehicles import VehicleState
 
@@ -24,7 +30,12 @@ class TrafficSimulator:
     intersections: tuple[Intersection, ...]
     time_step_seconds: float = 1.0
     seed: int = 0
+    events: tuple[TrafficEvent, ...] = ()
+    event_impact: EventImpactConfig = field(default_factory=EventImpactConfig)
     state: SimulationState = field(init=False)
+    _scheduled_vehicles: list[tuple[float, VehicleState, str | None]] = field(
+        init=False, default_factory=list
+    )
 
     def __post_init__(self) -> None:
         if self.time_step_seconds <= 0:
@@ -64,8 +75,11 @@ class TrafficSimulator:
                     raise ValueError(f"unknown route road: {road_id}")
             if not self._has_road_id(vehicle.current_road_id):
                 raise ValueError(f"unknown road: {vehicle.current_road_id}")
+            if not self._condition_for(vehicle.current_road_id).available:
+                raise ValueError(f"road is closed: {vehicle.current_road_id}")
             if occupancy.get(vehicle.current_road_id, 0) >= self._capacity_for_id(
-                vehicle.current_road_id
+                vehicle.current_road_id,
+                self._current_conditions(),
             ):
                 raise ValueError(f"road capacity exceeded: {vehicle.current_road_id}")
             occupancy[vehicle.current_road_id] = (
@@ -76,6 +90,64 @@ class TrafficSimulator:
             self.state.vehicles[vehicle.id] = vehicle
         self.state.refresh_road_occupancy()
         self._refresh_queues()
+
+    def set_events(self, events: Iterable[TrafficEvent]) -> None:
+        """Replace the scheduled event input without mutating the topology."""
+
+        scheduled = tuple(events)
+        event_ids = [event.id for event in scheduled]
+        if len(set(event_ids)) != len(event_ids):
+            raise ValueError("scheduled event IDs must be unique")
+        self.events = scheduled
+
+    def schedule_vehicle(
+        self,
+        vehicle: VehicleState,
+        spawn_time_seconds: float,
+        *,
+        arrival_event_id: str | None = None,
+    ) -> None:
+        """Schedule an existing vehicle state for later insertion.
+
+        When ``arrival_event_id`` is supplied, insertion waits until that
+        special-demand event is active. Vehicle movement still occurs only in
+        the simulator's normal ``step`` loop.
+        """
+
+        if spawn_time_seconds < 0:
+            raise ValueError("vehicle spawn time cannot be negative")
+        if vehicle.id in self.state.vehicles or any(
+            item[1].id == vehicle.id for item in self._scheduled_vehicles
+        ):
+            raise ValueError(f"duplicate vehicle id: {vehicle.id}")
+        self._scheduled_vehicles.append(
+            (spawn_time_seconds, vehicle, arrival_event_id)
+        )
+        self._scheduled_vehicles.sort(key=lambda item: (item[0], item[1].id))
+
+    def active_events(self, time_seconds: float | None = None) -> tuple[TrafficEvent, ...]:
+        """Return scheduled events active under the existing [start, end) rule."""
+
+        current_time = self.state.time_seconds if time_seconds is None else time_seconds
+        return tuple(
+            event
+            for event in self.events
+            if event.start_time_seconds <= current_time
+            < event.start_time_seconds + event.duration_seconds
+        )
+
+    def road_conditions(
+        self,
+        active_events: Iterable[TrafficEvent] | None = None,
+    ) -> dict[str, EffectiveRoadCondition]:
+        """Return effective conditions for the current simulation instant."""
+
+        events = self.active_events() if active_events is None else tuple(active_events)
+        return dict(
+            effective_road_conditions(
+                self._road_ids(), events, impact=self.event_impact
+            )
+        )
 
     def set_signal_phase(
         self,
@@ -94,9 +166,17 @@ class TrafficSimulator:
         signal.mode = mode  # type: ignore[assignment]
         signal.elapsed_seconds = 0.0
 
-    def step(self) -> SimulationState:
+    def step(
+        self,
+        active_events: Iterable[TrafficEvent] | None = None,
+    ) -> SimulationState:
         """Advance signals and vehicles by one configured time step."""
 
+        current_events = (
+            self.active_events() if active_events is None else tuple(active_events)
+        )
+        conditions = self.road_conditions(current_events)
+        self._activate_scheduled_vehicles(conditions, current_events)
         self._advance_signal_clocks()
         self.state.refresh_road_occupancy()
         occupancy = {
@@ -107,14 +187,20 @@ class TrafficSimulator:
             if vehicle.completed:
                 continue
             road = self._road_for_id(vehicle.current_road_id)
-            distance = vehicle.speed_kmh / 3.6 * self.time_step_seconds
+            condition = conditions[vehicle.current_road_id]
+            distance = (
+                vehicle.speed_kmh
+                * condition.speed_multiplier
+                / 3.6
+                * self.time_step_seconds
+            )
             if vehicle.position_meters + distance < road.length_meters:
                 vehicle.position_meters += distance
                 continue
 
             remaining_distance = road.length_meters - vehicle.position_meters
             endpoint = road.end_intersection_id
-            if self._can_exit_vehicle(vehicle, endpoint, occupancy):
+            if self._can_exit_vehicle(vehicle, endpoint, occupancy, conditions):
                 occupancy[vehicle.current_road_id] -= 1
                 if vehicle.route_index == len(vehicle.route_road_ids) - 1:
                     vehicle.position_meters = road.length_meters
@@ -167,6 +253,7 @@ class TrafficSimulator:
         vehicle: VehicleState,
         intersection_id: str,
         occupancy: dict[str, int],
+        conditions: dict[str, EffectiveRoadCondition],
     ) -> bool:
         signal = self.state.intersection_states[intersection_id]
         if not signal.permits_movement:
@@ -179,7 +266,12 @@ class TrafficSimulator:
             next_road = self._road_for_id(next_road_id)
             if next_road.start_intersection_id != intersection_id:
                 raise ValueError("vehicle route contains disconnected roads")
-            if occupancy.get(next_road_id, 0) >= self._capacity_for_id(next_road_id):
+            next_condition = conditions[next_road_id]
+            if not next_condition.available:
+                return False
+            if occupancy.get(next_road_id, 0) >= self._capacity_for_id(
+                next_road_id, conditions
+            ):
                 return False
         return True
 
@@ -201,10 +293,20 @@ class TrafficSimulator:
                 return attributes["road_segment"]
         raise ValueError(f"unknown road: {road_id}")
 
-    def _capacity_for_id(self, road_id: str) -> int:
+    def _capacity_for_id(
+        self,
+        road_id: str,
+        conditions: dict[str, EffectiveRoadCondition] | None = None,
+    ) -> int:
         for _, _, attributes in self.graph.edges(data=True):
             if attributes["road_id"] == road_id:
-                return attributes["capacity"]
+                base_capacity = attributes["capacity"]
+                if conditions is None:
+                    return base_capacity
+                return max(
+                    1,
+                    int(base_capacity * conditions[road_id].capacity_multiplier),
+                )
         raise ValueError(f"unknown road: {road_id}")
 
     def _road_endpoints(self, road_id: str) -> tuple[str, str]:
@@ -217,6 +319,46 @@ class TrafficSimulator:
         except ValueError:
             return False
         return True
+
+    def _road_ids(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                attributes["road_id"]
+                for _, _, attributes in self.graph.edges(data=True)
+            )
+        )
+
+    def _current_conditions(self) -> dict[str, EffectiveRoadCondition]:
+        return self.road_conditions()
+
+    def _condition_for(self, road_id: str) -> EffectiveRoadCondition:
+        return self._current_conditions()[road_id]
+
+    def _activate_scheduled_vehicles(
+        self,
+        conditions: dict[str, EffectiveRoadCondition],
+        active_events: tuple[TrafficEvent, ...],
+    ) -> None:
+        active_event_ids = {event.id for event in active_events}
+        pending: list[tuple[float, VehicleState, str | None]] = []
+        for spawn_time, vehicle, arrival_event_id in self._scheduled_vehicles:
+            if spawn_time > self.state.time_seconds:
+                pending.append((spawn_time, vehicle, arrival_event_id))
+                continue
+            if arrival_event_id is not None and arrival_event_id not in active_event_ids:
+                pending.append((spawn_time, vehicle, arrival_event_id))
+                continue
+            if not conditions[vehicle.current_road_id].available:
+                pending.append((spawn_time, vehicle, arrival_event_id))
+                continue
+            if self.state.road_occupancy.get(vehicle.current_road_id, ()) and (
+                len(self.state.road_occupancy[vehicle.current_road_id])
+                >= self._capacity_for_id(vehicle.current_road_id, conditions)
+            ):
+                pending.append((spawn_time, vehicle, arrival_event_id))
+                continue
+            self.add_vehicles((vehicle,))
+        self._scheduled_vehicles = pending
 
     @staticmethod
     def _movement_for_road(road_id: str) -> str:
