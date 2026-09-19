@@ -60,8 +60,14 @@ def validate_signal_transition(
     green_elapsed_seconds: int,
     yellow_elapsed_seconds: int,
     all_red_elapsed_seconds: int,
+    emergency_preemption: bool = False,
 ) -> None:
-    """Validate that a phase change has completed every safety interval."""
+    """Validate that a phase change has completed every safety interval.
+
+    ``emergency_preemption`` records the reason for a requested transition,
+    but it intentionally does not relax any safety rule. Emergency control is
+    implemented in a later phase; this validator remains the final safety gate.
+    """
 
     if green_elapsed_seconds < current_phase.min_green_seconds:
         raise DomainValidationError("minimum green time has not elapsed")

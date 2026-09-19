@@ -58,3 +58,17 @@ def test_signal_transition_requires_green_and_clearance_intervals() -> None:
         validate_signal_transition(current, next_phase, 10, 3, 0)
 
     validate_signal_transition(current, next_phase, 10, 3, 1)
+
+
+def test_emergency_preemption_does_not_bypass_signal_safety() -> None:
+    current, next_phase = create_default_signal_phases()
+
+    with pytest.raises(DomainValidationError, match="all-red"):
+        validate_signal_transition(
+            current,
+            next_phase,
+            green_elapsed_seconds=10,
+            yellow_elapsed_seconds=3,
+            all_red_elapsed_seconds=0,
+            emergency_preemption=True,
+        )
