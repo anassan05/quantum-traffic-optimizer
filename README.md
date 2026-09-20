@@ -1,10 +1,140 @@
-# Quantum-Enhanced Adaptive Urban Traffic Optimization
+# Quantum-Enhanced Urban Traffic Optimization
 
-Software-only research prototype for comparing classical and hybrid
-quantum-classical traffic signal optimization strategies.
+Quantum Traffic Optimizer is a software-only research prototype for comparing
+three traffic-signal controllers on the same deterministic urban scenario:
+Fixed-Time, Adaptive, and Quantum-Hybrid. It includes discrete-time vehicle
+simulation, scheduled road events, emergency vehicles, a safe emergency green
+corridor, QUBO construction, QAOA sampling with a classical fallback, and
+controller-comparison metrics.
 
-## Current Scope
+## Architecture
 
-Phase 1 defines dependency-free domain models, enums, configuration validation,
-and unit tests. Simulation, controllers, quantum optimization, and the
-Streamlit dashboard are intentionally not implemented yet.
+```mermaid
+flowchart TD
+		UI[Streamlit dashboard] --> EXP[Experiment runner]
+		EXP --> SC[Immutable scenario]
+		EXP --> FT[Fixed-Time controller]
+		EXP --> AD[Adaptive controller]
+		EXP --> QH[Quantum-Hybrid controller]
+		FT --> SIM[Traffic simulator]
+		AD --> SIM
+		QH --> QUBO[Signal-phase QUBO]
+		QUBO --> QAOA[QAOA / Aer solver]
+		QAOA -->|invalid or failed result| CLS[Exact classical fallback]
+		CLS --> SIM
+		SIM --> EVT[Events and closures]
+		SIM --> COR[Emergency corridor]
+		SIM --> MET[Metrics and estimates]
+		MET --> UI
+```
+
+Each controller receives a deep-cloned graph and vehicle state, but the same
+scenario ID, seed, duration, timestep, demand, and events. Signal transitions
+are applied by the simulator, which is the final safety gate for every vehicle,
+including emergency vehicles.
+
+## Installation
+
+Python 3.10 or newer is required. From the repository root:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
+```
+
+The project uses NetworkX, Qiskit, Qiskit Aer, Plotly, Streamlit, and Pytest.
+Qiskit Aer is used as a local simulator; no cloud quantum backend is required.
+
+## Running Tests
+
+```powershell
+python -m pytest -q
+```
+
+The test suite covers domain validation, signal safety, vehicle movement,
+capacity and closure handling, emergency priority and corridor lifecycle,
+QUBO/classical/QAOA solvers, deterministic experiments, metrics, and the
+cross-feature Phase 18 integration scenario.
+
+## Launching Streamlit
+
+From the repository root, with the virtual environment active:
+
+```powershell
+python -m streamlit run streamlit_app.py
+```
+
+The dashboard builds one scenario from the sidebar controls and compares all
+three controllers using independent clones of that scenario. It displays
+waiting time, throughput, completed vehicles, emergency delay, and transparent
+fuel and CO2 estimates, plus QAOA/classical objective samples and corridor
+status.
+
+## Controllers
+
+- **Fixed-Time** cycles through phases using configured green, yellow, and
+	all-red intervals.
+- **Adaptive** selects phases from observed queue and waiting information,
+	while preserving minimum green and clearance intervals.
+- **Quantum-Hybrid** builds a phase-selection QUBO, solves it with QAOA/Aer,
+	validates the sampled candidate, and uses the exact classical solution if
+	QAOA fails or returns an invalid candidate.
+
+## Quantum Approach
+
+For each intersection, binary variables represent candidate signal phases.
+The QUBO combines queue pressure, waiting pressure, switching cost, and a
+one-hot selection penalty. The exact classical solver enumerates the small
+formulation. The QAOA solver converts the QUBO to a diagonal Ising Hamiltonian,
+searches a deterministic coarse angle grid, and samples the circuit with Aer.
+Seeded sampling makes repeated runs reproducible. QAOA is treated as a
+candidate optimizer, not as a safety authority.
+
+This prototype makes **no unsupported quantum advantage claim**. It reports
+measured QAOA and exact-classical objectives for the selected scenario only;
+matching an exact result is not evidence of quantum advantage.
+
+## Metrics and Estimation Formulas
+
+For a run of duration $T$, completed vehicles $C$, vehicle waiting times
+$w_i$, and queue samples $q_t$:
+
+- Average waiting time: $\bar{w} = \frac{1}{N}\sum_i w_i$.
+- Maximum waiting time: $\max_i(w_i)$.
+- Throughput: $C/T$ vehicles per second.
+- Average queue length: the mean of the recorded queue samples.
+- Fuel estimate: $F = 0.08D + 0.6W/3600$ liters, where $D$ is traveled
+	distance in kilometers and $W$ is total waiting time in seconds.
+- CO2 estimate: $E = 2.31F$ kilograms.
+
+The fuel rates and CO2 factor are transparent engineering assumptions, not
+measurements. Emergency delay is the observed emergency vehicle waiting time.
+
+## Safety and Reproducibility
+
+Vehicles can exit an intersection only during a permitted green movement. The
+simulator blocks movement during yellow and all-red, rejects closed downstream
+roads, checks road capacity before entry, and requires yellow plus all-red
+clearance before a requested emergency phase becomes green. Failed or invalid
+QAOA results use the exact classical phase selection, still subject to the
+same transition validator.
+
+Scenario generation, controller ordering, vehicle ordering, QAOA angle search,
+and Aer sampling are deterministic under the configured seed. Re-running the
+same scenario produces equal experiment and analysis results.
+
+## Known Limitations
+
+- The network and signal movement mapping are intentionally small and
+	prototype-oriented.
+- The classical solver is exhaustive and therefore does not scale to large
+	QUBOs.
+- QAOA uses a local Aer simulator, a coarse deterministic angle grid, and
+	finite shots; it is not a production quantum implementation.
+- Vehicle demand, routes, speeds, and signal timing are simplified.
+- Environmental outputs are estimates and should not be interpreted as field
+	measurements or emissions certification.
+- No claim is made that the hybrid controller outperforms the classical
+	controllers outside the measured scenario and metrics shown.

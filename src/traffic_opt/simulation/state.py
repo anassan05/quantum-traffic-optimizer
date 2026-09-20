@@ -52,6 +52,8 @@ class SimulationState:
         default_factory=dict
     )
     road_occupancy: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    active_event_ids: tuple[str, ...] = ()
+    emergency_vehicle_ids: tuple[str, ...] = ()
 
     def refresh_road_occupancy(self) -> None:
         """Rebuild deterministic road occupancy from active vehicles."""

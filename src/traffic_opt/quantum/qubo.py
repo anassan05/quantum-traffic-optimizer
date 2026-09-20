@@ -227,8 +227,10 @@ def _roads_for_phase(
 ) -> tuple[str, ...]:
     known_roads = tuple(sorted(set(state.queue_lengths) | set(state.road_occupancy)))
     matches: set[str] = set()
+    has_explicit_mapping = False
     for movement in sorted(phase.movements):
         if movement_road_map and movement in movement_road_map:
+            has_explicit_mapping = True
             matches.update(
                 road_id for road_id in movement_road_map[movement] if road_id in known_roads
             )
@@ -238,7 +240,9 @@ def _roads_for_phase(
             for road_id in known_roads
             if normalized == road_id.lower() or normalized in road_id.lower()
         )
-    return tuple(sorted(matches)) or known_roads
+    if matches or has_explicit_mapping:
+        return tuple(sorted(matches))
+    return known_roads
 
 
 def _phases_conflict(left: SignalPhaseConfig, right: SignalPhaseConfig) -> bool:

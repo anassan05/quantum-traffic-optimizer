@@ -104,11 +104,16 @@ class Vehicle:
     position_meters: float = 0.0
     waiting_time_seconds: float = 0.0
     completed: bool = False
+    is_emergency: bool = False
 
     def __post_init__(self) -> None:
         _require_identifier(self.id, "vehicle id")
         _require_identifier(self.origin_intersection_id, "vehicle origin")
         _require_identifier(self.destination_intersection_id, "vehicle destination")
+        if not isinstance(self.is_emergency, bool):
+            raise DomainValidationError("vehicle emergency flag must be boolean")
+        if self.vehicle_type is VehicleType.AMBULANCE:
+            object.__setattr__(self, "is_emergency", True)
         route = tuple(self.route_road_ids)
         object.__setattr__(self, "route_road_ids", route)
         if not route or any(not road_id for road_id in route):
@@ -119,6 +124,12 @@ class Vehicle:
             raise DomainValidationError("vehicle waiting time cannot be negative")
         if self.current_road_id is not None and self.current_road_id not in route:
             raise DomainValidationError("current road must be included in vehicle route")
+
+    @property
+    def is_emergency_vehicle(self) -> bool:
+        """Whether this vehicle is identified as an emergency vehicle."""
+
+        return self.is_emergency
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,8 @@
+networkx>=3.0
+qiskit<3,>=2.5
+qiskit-aer<1,>=0.17
+plotly>=5.0
+streamlit>=1.40
+
+[test]
+pytest>=8.0

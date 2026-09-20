@@ -5,10 +5,13 @@ from typing import Iterable
 
 import networkx as nx
 
-from traffic_opt.domain.models import Intersection
+from traffic_opt.controllers.emergency_corridor import EmergencyCorridorManager
+from traffic_opt.domain.models import Intersection, TrafficEvent
 
+from .events import EventManager
+from .metrics import MetricsCollector, SimulationMetrics
 from .state import IntersectionSignalState, SimulationState
-from .vehicles import VehicleState
+from .vehicles import VehicleState, create_emergency_vehicle
 
 
 @dataclass(slots=True)
@@ -24,12 +27,20 @@ class TrafficSimulator:
     intersections: tuple[Intersection, ...]
     time_step_seconds: float = 1.0
     seed: int = 0
+    events: tuple[TrafficEvent, ...] = ()
     state: SimulationState = field(init=False)
+    event_manager: EventManager = field(init=False)
+    corridor_manager: EmergencyCorridorManager = field(init=False)
+    metrics_collector: MetricsCollector = field(init=False)
 
     def __post_init__(self) -> None:
         if self.time_step_seconds <= 0:
             raise ValueError("time step must be greater than zero")
+        self.event_manager = EventManager(self.events, self.graph)
+        self.corridor_manager = EmergencyCorridorManager(self.graph, self.intersections)
         self.state = SimulationState()
+        self._refresh_active_event_ids()
+        self._refresh_emergency_vehicle_ids()
         intersection_by_id = {intersection.id: intersection for intersection in self.intersections}
         if set(intersection_by_id) != set(self.graph.nodes):
             raise ValueError("intersection configuration must match graph nodes")
@@ -45,6 +56,14 @@ class TrafficSimulator:
             for _, _, attributes in self.graph.edges(data=True)
         }
         self.state.refresh_road_occupancy()
+        self.metrics_collector = MetricsCollector(self.graph)
+        self.metrics_collector.record(self.state)
+
+    @property
+    def metrics(self) -> SimulationMetrics:
+        """Return deterministic metrics for the current simulation state."""
+
+        return self.metrics_collector.snapshot(self.state)
 
     def add_vehicles(self, vehicles: Iterable[VehicleState]) -> None:
         """Add vehicles after validating IDs and road references."""
@@ -64,6 +83,8 @@ class TrafficSimulator:
                     raise ValueError(f"unknown route road: {road_id}")
             if not self._has_road_id(vehicle.current_road_id):
                 raise ValueError(f"unknown road: {vehicle.current_road_id}")
+            if self._is_road_closed(vehicle.current_road_id):
+                raise ValueError(f"road is closed: {vehicle.current_road_id}")
             if occupancy.get(vehicle.current_road_id, 0) >= self._capacity_for_id(
                 vehicle.current_road_id
             ):
@@ -76,6 +97,29 @@ class TrafficSimulator:
             self.state.vehicles[vehicle.id] = vehicle
         self.state.refresh_road_occupancy()
         self._refresh_queues()
+        self._refresh_emergency_vehicle_ids()
+        self.metrics_collector.record(self.state)
+
+    def add_emergency_vehicle(
+        self,
+        vehicle_id: str,
+        origin_intersection_id: str,
+        destination_intersection_id: str,
+        route_road_ids: tuple[str, ...],
+        speed_kmh: float | None = None,
+    ) -> VehicleState:
+        """Create and add an ambulance using the normal admission checks."""
+
+        vehicle = create_emergency_vehicle(
+            self.graph,
+            vehicle_id,
+            origin_intersection_id,
+            destination_intersection_id,
+            route_road_ids,
+            speed_kmh,
+        )
+        self.add_vehicles((vehicle,))
+        return vehicle
 
     def set_signal_phase(
         self,
@@ -97,6 +141,12 @@ class TrafficSimulator:
     def step(self) -> SimulationState:
         """Advance signals and vehicles by one configured time step."""
 
+        self.corridor_manager.update(
+            self.state.vehicles.values(),
+            self.state.intersection_states,
+            self.state.time_seconds,
+            self.event_manager.is_road_closed,
+        )
         self._advance_signal_clocks()
         self.state.refresh_road_occupancy()
         occupancy = {
@@ -134,8 +184,11 @@ class TrafficSimulator:
                 vehicle.waiting_time_seconds += self.time_step_seconds
 
         self.state.time_seconds += self.time_step_seconds
+        self._refresh_active_event_ids()
         self.state.refresh_road_occupancy()
         self._refresh_queues()
+        self._refresh_emergency_vehicle_ids()
+        self.metrics_collector.record(self.state)
         return self.state
 
     def run(self, steps: int) -> SimulationState:
@@ -151,14 +204,32 @@ class TrafficSimulator:
         for signal in self.state.intersection_states.values():
             signal.elapsed_seconds += self.time_step_seconds
             phase = signal.current_phase
-            if signal.mode == "green" and signal.elapsed_seconds >= phase.max_green_seconds:
+            requested_phase = self.corridor_manager.requested_phase(
+                signal.intersection_id
+            )
+            if (
+                signal.mode == "green"
+                and requested_phase is not None
+                and requested_phase != signal.current_phase_index
+                and signal.elapsed_seconds >= phase.min_green_seconds
+            ):
+                signal.mode = "yellow"
+                signal.elapsed_seconds = 0.0
+            elif signal.mode == "green" and signal.elapsed_seconds >= phase.max_green_seconds:
                 signal.mode = "yellow"
                 signal.elapsed_seconds = 0.0
             elif signal.mode == "yellow" and signal.elapsed_seconds >= phase.yellow_seconds:
                 signal.mode = "all_red"
                 signal.elapsed_seconds = 0.0
             elif signal.mode == "all_red" and signal.elapsed_seconds >= phase.all_red_seconds:
-                signal.current_phase_index = (signal.current_phase_index + 1) % len(signal.phases)
+                requested_phase = self.corridor_manager.requested_phase(
+                    signal.intersection_id
+                )
+                signal.current_phase_index = (
+                    requested_phase
+                    if requested_phase is not None
+                    else (signal.current_phase_index + 1) % len(signal.phases)
+                )
                 signal.mode = "green"
                 signal.elapsed_seconds = 0.0
 
@@ -179,6 +250,8 @@ class TrafficSimulator:
             next_road = self._road_for_id(next_road_id)
             if next_road.start_intersection_id != intersection_id:
                 raise ValueError("vehicle route contains disconnected roads")
+            if self._is_road_closed(next_road_id):
+                return False
             if occupancy.get(next_road_id, 0) >= self._capacity_for_id(next_road_id):
                 return False
         return True
@@ -217,6 +290,26 @@ class TrafficSimulator:
         except ValueError:
             return False
         return True
+
+    def _is_road_closed(self, road_id: str) -> bool:
+        return self.event_manager.is_road_closed(road_id, self._event_time())
+
+    def _refresh_active_event_ids(self) -> None:
+        self.state.active_event_ids = self.event_manager.active_event_ids(
+            self._event_time()
+        )
+
+    def _refresh_emergency_vehicle_ids(self) -> None:
+        self.state.emergency_vehicle_ids = tuple(
+            sorted(
+                vehicle.id
+                for vehicle in self.state.vehicles.values()
+                if vehicle.is_emergency
+            )
+        )
+
+    def _event_time(self) -> int:
+        return int(self.state.time_seconds)
 
     @staticmethod
     def _movement_for_road(road_id: str) -> str:

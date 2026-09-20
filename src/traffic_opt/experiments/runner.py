@@ -8,7 +8,9 @@ from traffic_opt.controllers.base import SignalController, SignalDecision
 from traffic_opt.controllers.fixed_time import FixedTimeController
 from traffic_opt.controllers.quantum_hybrid import QuantumHybridComparison, QuantumHybridController
 from traffic_opt.simulation.simulator import TrafficSimulator
+from traffic_opt.simulation.metrics import SimulationMetrics
 from traffic_opt.simulation.state import SimulationState
+from traffic_opt.controllers.emergency_corridor import EmergencyCorridorResult
 
 from .scenarios import TrafficScenario, clone_scenario
 
@@ -28,6 +30,8 @@ class ControllerRunResult:
     queue_history: tuple[Mapping[str, int], ...]
     waiting_history: tuple[Mapping[str, float], ...]
     qaoa_comparisons: tuple[Mapping[str, QuantumHybridComparison], ...]
+    metrics: SimulationMetrics
+    corridor_history: tuple[EmergencyCorridorResult, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +45,74 @@ class ExperimentResult:
     controller_results: Mapping[str, ControllerRunResult]
 
 
+@dataclass(frozen=True, slots=True)
+class ControllerComparison:
+    """Comparable metrics for one controller run."""
+
+    controller_name: str
+    average_waiting_time_seconds: float
+    maximum_waiting_time_seconds: float
+    throughput_vehicles_per_second: float
+    completed_vehicles: int
+    estimated_fuel_consumption_liters: float
+    estimated_co2_emissions_kg: float
+    emergency_vehicle_delay_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class QAOAObjectiveComparison:
+    """One measured QAOA objective alongside its exact classical objective."""
+
+    simulation_step: int
+    intersection_id: str
+    qaoa_objective_value: float
+    classical_objective_value: float
+    matches_classical: bool
+    used_fallback: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentAnalysis:
+    """Derived, controller-comparable views of an experiment result."""
+
+    controller_metrics: tuple[ControllerComparison, ...]
+    qaoa_objectives: tuple[QAOAObjectiveComparison, ...]
+
+
+def analyze_experiment(result: ExperimentResult) -> ExperimentAnalysis:
+    """Build comparable metrics without changing the underlying run result."""
+
+    controller_metrics = tuple(
+        ControllerComparison(
+            controller_name=name,
+            average_waiting_time_seconds=controller_result.metrics.average_waiting_time_seconds,
+            maximum_waiting_time_seconds=controller_result.metrics.maximum_waiting_time_seconds,
+            throughput_vehicles_per_second=controller_result.metrics.throughput_vehicles_per_second,
+            completed_vehicles=controller_result.metrics.total_vehicles_completed,
+            estimated_fuel_consumption_liters=controller_result.metrics.estimated_fuel_consumption_liters,
+            estimated_co2_emissions_kg=controller_result.metrics.estimated_co2_emissions_kg,
+            emergency_vehicle_delay_seconds=controller_result.metrics.average_emergency_vehicle_delay_seconds,
+        )
+        for name, controller_result in result.controller_results.items()
+    )
+    qaoa_objectives = tuple(
+        QAOAObjectiveComparison(
+            simulation_step=step,
+            intersection_id=intersection_id,
+            qaoa_objective_value=comparison.qaoa_objective_value,
+            classical_objective_value=comparison.classical_objective_value,
+            matches_classical=comparison.qaoa_matches_classical,
+            used_fallback=comparison.used_fallback,
+        )
+        for controller_result in result.controller_results.values()
+        if controller_result.controller_name == "quantum_hybrid"
+        for step, comparisons in enumerate(controller_result.qaoa_comparisons)
+        for intersection_id, comparison in sorted(comparisons.items())
+        if comparison.qaoa_objective_value is not None
+    )
+    return ExperimentAnalysis(controller_metrics, qaoa_objectives)
+
+
 def run_experiment(
     scenario: TrafficScenario,
     *,
@@ -48,7 +120,23 @@ def run_experiment(
 ) -> ExperimentResult:
     """Run fixed-time, adaptive, and quantum-hybrid controllers fairly."""
 
-    configuration = controller_config or scenario.controller_config
+    configuration = {
+        name: dict(settings)
+        for name, settings in (controller_config or scenario.controller_config).items()
+    }
+    default_movement_road_map = {
+        "north_south": (),
+        "east_west": tuple(
+            sorted(
+                attributes["road_id"]
+                for _, _, attributes in scenario.graph.edges(data=True)
+            )
+        )
+    }
+    for controller_name in ("adaptive", "quantum_hybrid"):
+        configuration.setdefault(controller_name, {}).setdefault(
+            "movement_road_map", default_movement_road_map
+        )
     controllers: tuple[tuple[str, SignalController], ...] = (
         ("fixed_time", FixedTimeController(**configuration.get("fixed_time", {}))),
         ("adaptive", AdaptiveController(**configuration.get("adaptive", {}))),
@@ -85,6 +173,7 @@ def run_scenario_controller(
         isolated.intersections,
         time_step_seconds=isolated.time_step_seconds,
         seed=isolated.seed,
+        events=isolated.events,
     )
     simulator.add_vehicles(isolated.initial_vehicles)
     steps = int(isolated.duration_seconds / isolated.time_step_seconds)
@@ -92,6 +181,7 @@ def run_scenario_controller(
     queues: list[Mapping[str, int]] = []
     waiting: list[Mapping[str, float]] = []
     comparisons: list[Mapping[str, QuantumHybridComparison]] = []
+    corridor_history: list[EmergencyCorridorResult] = []
     for _ in range(steps):
         selected = controller.decide(simulator.state)
         decisions.append(selected)
@@ -108,6 +198,7 @@ def run_scenario_controller(
             comparisons.append({})
         _apply_decisions(simulator, selected)
         simulator.step()
+        corridor_history.append(simulator.corridor_manager.last_result)
     completed = sum(vehicle.completed for vehicle in simulator.state.vehicles.values())
     return ControllerRunResult(
         controller_name=controller_name,
@@ -121,6 +212,8 @@ def run_scenario_controller(
         queue_history=tuple(queues),
         waiting_history=tuple(waiting),
         qaoa_comparisons=tuple(comparisons),
+        metrics=simulator.metrics,
+        corridor_history=tuple(corridor_history),
     )
 
 

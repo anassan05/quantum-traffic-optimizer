@@ -177,8 +177,10 @@ class AdaptiveController:
     ) -> tuple[str, ...] | None:
         known_roads = tuple(sorted(state.queue_lengths))
         matches: set[str] = set()
+        has_explicit_mapping = False
         for movement in sorted(phase.movements):
             if self.movement_road_map and movement in self.movement_road_map:
+                has_explicit_mapping = True
                 matches.update(
                     road_id
                     for road_id in self.movement_road_map[movement]
@@ -190,4 +192,6 @@ class AdaptiveController:
                 for road_id in known_roads
                 if normalized == road_id.lower() or normalized in road_id.lower()
             )
-        return tuple(sorted(matches)) if matches else None
+        if matches or has_explicit_mapping:
+            return tuple(sorted(matches))
+        return None

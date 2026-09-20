@@ -37,10 +37,15 @@ class VehicleState:
     waiting_time_seconds: float = 0.0
     route_index: int = 0
     completed: bool = False
+    is_emergency: bool = False
 
     def __post_init__(self) -> None:
         if not self.id.strip():
             raise ValueError("vehicle id must be non-empty")
+        if not isinstance(self.is_emergency, bool):
+            raise ValueError("vehicle emergency flag must be boolean")
+        if self.vehicle_type is VehicleType.AMBULANCE:
+            self.is_emergency = True
         if not self.route_road_ids:
             raise ValueError("vehicle route must contain at least one road")
         if self.current_road_id not in self.route_road_ids:
@@ -75,7 +80,60 @@ class VehicleState:
             waiting_time_seconds=vehicle.waiting_time_seconds,
             route_index=vehicle.route_road_ids.index(current_road_id),
             completed=vehicle.completed,
+            is_emergency=vehicle.is_emergency,
         )
+
+    @property
+    def is_emergency_vehicle(self) -> bool:
+        """Whether this vehicle is identified as an emergency vehicle."""
+
+        return self.is_emergency
+
+
+def create_emergency_vehicle(
+    graph: nx.DiGraph,
+    vehicle_id: str,
+    origin_intersection_id: str,
+    destination_intersection_id: str,
+    route_road_ids: tuple[str, ...],
+    speed_kmh: float | None = None,
+) -> VehicleState:
+    """Create an ambulance after validating its route against ``graph``."""
+
+    if not isinstance(vehicle_id, str) or not vehicle_id.strip():
+        raise ValueError("vehicle ID must be non-empty")
+    if not isinstance(origin_intersection_id, str) or not origin_intersection_id.strip():
+        raise ValueError("vehicle origin must be non-empty")
+    if not isinstance(destination_intersection_id, str) or not destination_intersection_id.strip():
+        raise ValueError("vehicle destination must be non-empty")
+    if not isinstance(route_road_ids, tuple) or not route_road_ids:
+        raise ValueError("emergency vehicle route must contain road IDs")
+
+    roads_by_id = {
+        attributes["road_id"]: (start, end)
+        for start, end, attributes in graph.edges(data=True)
+    }
+    missing = [road_id for road_id in route_road_ids if road_id not in roads_by_id]
+    if missing:
+        raise ValueError(f"unknown route road: {missing[0]}")
+    if roads_by_id[route_road_ids[0]][0] != origin_intersection_id:
+        raise ValueError("emergency route does not start at origin")
+    for current_road_id, next_road_id in zip(route_road_ids, route_road_ids[1:]):
+        if roads_by_id[current_road_id][1] != roads_by_id[next_road_id][0]:
+            raise ValueError("emergency route contains disconnected roads")
+    if roads_by_id[route_road_ids[-1]][1] != destination_intersection_id:
+        raise ValueError("emergency route does not end at destination")
+
+    return VehicleState(
+        id=vehicle_id,
+        vehicle_type=VehicleType.AMBULANCE,
+        origin_intersection_id=origin_intersection_id,
+        destination_intersection_id=destination_intersection_id,
+        route_road_ids=route_road_ids,
+        current_road_id=route_road_ids[0],
+        speed_kmh=speed_kmh or DEFAULT_SPEED_KMH[VehicleType.AMBULANCE],
+        is_emergency=True,
+    )
 
 
 def generate_vehicles(
@@ -83,6 +141,7 @@ def generate_vehicles(
     count: int,
     seed: int = 0,
     vehicle_type: VehicleType = VehicleType.CAR,
+    excluded_road_ids: frozenset[str] = frozenset(),
 ) -> tuple[VehicleState, ...]:
     """Generate deterministic vehicles from sorted graph roads.
 
@@ -99,6 +158,7 @@ def generate_vehicles(
             end,
         )
         for start, end, attributes in graph.edges(data=True)
+        if attributes["road_id"] not in excluded_road_ids
     )
     if not roads and count:
         raise ValueError("cannot generate vehicles without road segments")
